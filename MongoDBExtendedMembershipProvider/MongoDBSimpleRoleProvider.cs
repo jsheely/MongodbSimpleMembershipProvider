@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Configuration;
 using System.Configuration.Provider;
 using System.Globalization;
 using System.Linq;
@@ -18,7 +19,7 @@ namespace MongoDBExtendedMembershipProvider
     public partial class MongoDBSimpleRoleProvider : RoleProvider
     {
         #region Constructor(s)
-        private MongoDatabase mongoDatabase;
+        private MongoDatabase mongoDB;
         private readonly string WEBPAGESROLE = "WebpagesRole";
 
         public MongoDBSimpleRoleProvider()
@@ -46,15 +47,17 @@ namespace MongoDBExtendedMembershipProvider
 
             // MongoDB setup
             this.ConnectionStringName = GetValueOrDefault(config, "connectionStringName", o => o.ToString(), string.Empty);
-            mongoDatabase = MongoServer.Create(config["connectionString"] ?? "mongodb://localhost").GetDatabase(config["database"] ?? "nadjiba");
+            MongoConnectionStringBuilder conString = new MongoConnectionStringBuilder(ConfigurationManager.ConnectionStrings[ConnectionStringName].ConnectionString);
+            MongoServer server = new MongoClient(conString.ToString()).GetServer();
+            this.mongoDB = server.GetDatabase(conString.DatabaseName);
             // set id autoincrement generator
             BsonClassMap.RegisterClassMap<WebpagesRole>(cm =>
             {
                 cm.AutoMap();
                 cm.IdMemberMap.SetIdGenerator(new IntIdGenerator());
             });
-            var rolesMongoCollection = mongoDatabase.GetCollection("WebpagesRole");
-            var usersInRolesMongoCollection = mongoDatabase.GetCollection("WebpagesUsersInRole");
+            var rolesMongoCollection = mongoDB.GetCollection("WebpagesRole");
+            var usersInRolesMongoCollection = mongoDB.GetCollection("WebpagesUsersInRole");
             rolesMongoCollection.EnsureIndex("RoleName");
             //this.rolesMongoCollection.EnsureIndex("ApplicationName", "Role");
             //this.usersInRolesMongoCollection.EnsureIndex("ApplicationName", "Role");
@@ -64,7 +67,7 @@ namespace MongoDBExtendedMembershipProvider
             config.Remove("name");
             config.Remove("description");
             config.Remove("applicationName");
-            config.Remove("connectionString");
+            config.Remove("connectionStringName");
 
             if (config.Count <= 0)
                 return;
@@ -100,14 +103,14 @@ namespace MongoDBExtendedMembershipProvider
                 var query = Query.EQ("RoleId", role.RoleId);
                 query = Query.And(query, Query.In("UserId", new BsonArray(userIds)));
                 var alreadyExist =
-                    this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
+                    this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
                 if (alreadyExist.Count() > 0)
                 {
                     throw new InvalidOperationException(string.Format("User with id = {0} already exists in role {1}", alreadyExist.First().UserId, role.RoleName));
                 }
 
                 var roleUser = users.Select(u => new WebpagesUsersInRole() {RoleId = role.RoleId, UserId = u.UserId});
-                this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").InsertBatch(roleUser, WriteConcern.Acknowledged);
+                this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").InsertBatch(roleUser, WriteConcern.Acknowledged);
             }
         }
 
@@ -116,8 +119,8 @@ namespace MongoDBExtendedMembershipProvider
             var role = new WebpagesRole { RoleName = roleName };
             if (GetRoles(new[] { roleName }).Count() > 0)
                 throw new ProviderException(string.Format("Role {0} already exists!", roleName));
-            //role.RoleId = (int)this.mongoDatabase.GetCollection<WebpagesRole>(WEBPAGESROLE).Count();
-            this.mongoDatabase.GetCollection<WebpagesRole>(WEBPAGESROLE).Insert(role, WriteConcern.Acknowledged);
+            //role.RoleId = (int)this.mongoDB.GetCollection<WebpagesRole>(WEBPAGESROLE).Count();
+            this.mongoDB.GetCollection<WebpagesRole>(WEBPAGESROLE).Insert(role, WriteConcern.Acknowledged);
         }
 
         public override bool DeleteRole(string roleName, bool throwOnPopulatedRole)
@@ -129,7 +132,7 @@ namespace MongoDBExtendedMembershipProvider
             if (throwOnPopulatedRole)
             {
                 var query = Query.EQ("RoleId", role.RoleId);
-                var usersInRole = this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
+                var usersInRole = this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
                 if (usersInRole.Count() > 0)
                 {
                     throw new ProviderException(string.Format("Role {0} is not empty!", roleName));
@@ -138,16 +141,16 @@ namespace MongoDBExtendedMembershipProvider
             else
             {
                 var query = Query.EQ("RoleId", role.RoleId);
-                this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Remove(query, WriteConcern.Acknowledged);
+                this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Remove(query, WriteConcern.Acknowledged);
             }
-            return this.mongoDatabase.GetCollection<WebpagesRole>(WEBPAGESROLE).Remove(
+            return this.mongoDB.GetCollection<WebpagesRole>(WEBPAGESROLE).Remove(
                 Query.EQ("RoleId", role.RoleId), WriteConcern.Acknowledged).Ok;
         }
 
         public override string[] FindUsersInRole(string roleName, string usernameToMatch)
         {
             var role = GetRoles(new[] { roleName }).FirstOrDefault();
-            var users = this.mongoDatabase.GetCollection<UserProfile>("UserProfile").Find(
+            var users = this.mongoDB.GetCollection<UserProfile>("UserProfile").Find(
                 Query.Matches("UserName", usernameToMatch));
             if (users == null)
                 throw new ProviderException(string.Format("User {0} does not exist!", usernameToMatch));
@@ -156,12 +159,12 @@ namespace MongoDBExtendedMembershipProvider
 
             var query = Query.In("UserId", new BsonArray(users.Select(u => u.UserId).ToArray()));
             query = Query.And(query, Query.EQ("RoleId", role.RoleId));
-            var usersInRole = this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
+            var usersInRole = this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
 
             if (usersInRole != null)
             {
                 query = Query.In("UserId", new BsonArray(usersInRole.Select(u => u.UserId).ToArray()));
-                var foundUsers = this.mongoDatabase.GetCollection<UserProfile>("UserProfile").Find(query);
+                var foundUsers = this.mongoDB.GetCollection<UserProfile>("UserProfile").Find(query);
 
                 if (foundUsers != null)
                 {
@@ -176,7 +179,7 @@ namespace MongoDBExtendedMembershipProvider
 
         public override string[] GetAllRoles()
         {
-            var roles = this.mongoDatabase.GetCollection<WebpagesRole>(WEBPAGESROLE).FindAll();
+            var roles = this.mongoDB.GetCollection<WebpagesRole>(WEBPAGESROLE).FindAll();
 
             if (roles.Count() > 0)
             {
@@ -193,12 +196,12 @@ namespace MongoDBExtendedMembershipProvider
             if (user != null)
             {
                 var query = Query.EQ("UserId", user.UserId);
-                var roleUser = this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
+                var roleUser = this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
 
                 if (roleUser != null)
                 {
                     query = Query.In("RoleId", new BsonArray(roleUser.Select(p => p.RoleId)));
-                    var roles = this.mongoDatabase.GetCollection<WebpagesRole>(WEBPAGESROLE).Find(query);
+                    var roles = this.mongoDB.GetCollection<WebpagesRole>(WEBPAGESROLE).Find(query);
                     return roles.Select(r => r.RoleName).OrderBy(u => u).ToArray();
                 }
             }
@@ -212,12 +215,12 @@ namespace MongoDBExtendedMembershipProvider
             if (role != null)
             {
                 var query = Query.EQ("RoleId", role.RoleId);
-                var roleUser = this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
+                var roleUser = this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Find(query);
 
                 if (roleUser != null)
                 {
                     query = Query.In("UserId", new BsonArray(roleUser.Select(p => p.UserId)));
-                    var users = this.mongoDatabase.GetCollection<UserProfile>("UserProfile").Find(query);
+                    var users = this.mongoDB.GetCollection<UserProfile>("UserProfile").Find(query);
                     return users.Select(u => u.UserName).OrderBy(u => u).ToArray();
                 }
             }
@@ -237,7 +240,7 @@ namespace MongoDBExtendedMembershipProvider
 
                 var query = Query.EQ("UserId", user.UserId);
                 query = Query.And(query, Query.EQ("RoleId", role.RoleId));
-                return this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").FindOne(query) != null;
+                return this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").FindOne(query) != null;
             }
         }
 
@@ -251,7 +254,7 @@ namespace MongoDBExtendedMembershipProvider
 
             var query = Query.In("UserId", new BsonArray(userIds));
             query = Query.And(query, Query.In("RoleId", new BsonArray(roleIds)));
-            this.mongoDatabase.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Remove(query, WriteConcern.Acknowledged);
+            this.mongoDB.GetCollection<WebpagesUsersInRole>("WebpagesUsersInRole").Remove(query, WriteConcern.Acknowledged);
 
         }
 
@@ -281,14 +284,14 @@ namespace MongoDBExtendedMembershipProvider
 
         private IEnumerable<UserProfile> GetUsers(string[] usernames)
         {
-            var users = this.mongoDatabase.GetCollection<UserProfile>("UserProfile").Find(Query.In("UserName", new BsonArray(usernames)));
+            var users = this.mongoDB.GetCollection<UserProfile>("UserProfile").Find(Query.In("UserName", new BsonArray(usernames)));
             return users;
         }
 
         private IEnumerable<WebpagesRole> GetRoles(string[] rolenames)
         {
             var roles =
-                mongoDatabase.GetCollection<WebpagesRole>(WEBPAGESROLE).Find(Query.In("RoleName", new BsonArray(rolenames)));
+                mongoDB.GetCollection<WebpagesRole>(WEBPAGESROLE).Find(Query.In("RoleName", new BsonArray(rolenames)));
 
             return roles;
         }

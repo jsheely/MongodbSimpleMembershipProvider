@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Configuration;
 using System.Configuration.Provider;
 using System.Globalization;
 using System.Linq;
@@ -28,6 +29,7 @@ namespace MongoDBExtendedMembershipProvider
 
         public MongoDBSimpleMembershipProvider()
         {
+
         }
 
         //public ExtendedAdapterMembershipProvider(IDataAccessAdapterFactory dataAccessAdapterFactory)
@@ -53,10 +55,13 @@ namespace MongoDBExtendedMembershipProvider
             base.Initialize(name, config);
 
             ApplicationName = GetValueOrDefault(config, "applicationName", o => o.ToString(), "MySampleApp");
-            
+
             // MongoDB setup
-            this.ConnectionStringName = GetValueOrDefault(config, "connectionString", o => o.ToString(), string.Empty);
-            this.mongoDB = MongoServer.Create(config["connectionString"] ?? "mongodb://localhost").GetDatabase(config["database"] ?? "nadjiba");
+            this.ConnectionStringName = GetValueOrDefault(config, "connectionStringName", o => o.ToString(), string.Empty);
+            MongoConnectionStringBuilder conString = new MongoConnectionStringBuilder(ConfigurationManager.ConnectionStrings[ConnectionStringName].ConnectionString);
+            MongoServer server = new MongoClient(conString.ToString()).GetServer();
+            this.mongoDB = server.GetDatabase(conString.DatabaseName);
+
             mongoDB.SetProfilingLevel(ProfilingLevel.All);
             // set id autoincrement generator
             BsonClassMap.RegisterClassMap<UserProfile>(cm =>
@@ -91,7 +96,7 @@ namespace MongoDBExtendedMembershipProvider
             config.Remove("name");
             config.Remove("description");
             config.Remove("applicationName");
-            config.Remove("connectionString");
+            config.Remove("connectionStringName");
             config.Remove("enablePasswordRetrieval");
             config.Remove("enablePasswordReset");
             config.Remove("requiresQuestionAndAnswer");
@@ -395,8 +400,13 @@ namespace MongoDBExtendedMembershipProvider
                 var passwordSet = SetPasswordInternal(membership.UserId, newPassword);
                 if (passwordSet)
                 {
+                    //Need to get the new row with the new password
+                    membership = this.mongoDB.GetCollection<WebpagesMembership>("WebpagesMembership").Find(Query.EQ("UserId", membership.UserId)).First();
+
                     membership.PasswordVerificationToken = null;
                     membership.PasswordVerificationTokenExpirationDate = null;
+                   
+                    
                     if (!this.mongoDB.GetCollection<WebpagesMembership>("WebpagesMembership").Save(membership).Ok)
                         throw new ProviderException("Unable to reset password with token!");
                 }
@@ -489,11 +499,23 @@ namespace MongoDBExtendedMembershipProvider
         #endregion
 
         #region Required ExtendedMembershipProvider Overrides
+
+        public UserProfile CreateUserProfile(UserProfile UserInfo)
+        {
+            if (UserInfo == null)
+            {
+                this.mongoDB.GetCollection<UserProfile>("UserProfile").Insert(UserInfo, WriteConcern.Acknowledged);
+                UserInfo = this.GetUsers(new[] { UserInfo.UserName }).FirstOrDefault();
+            }
+            return UserInfo;
+        }
+
         public override string CreateAccount(string userName, string password)
         {
             // let the base class handle this one
             return base.CreateAccount(userName, password);
         }
+
         public override void CreateOrUpdateOAuthAccount(string provider, string providerUserId, string userName)
         {
             if (string.IsNullOrEmpty(userName))
@@ -507,10 +529,11 @@ namespace MongoDBExtendedMembershipProvider
                 {
                     // TODO lock Inplement int generator
                     //var count = (int)this.mongoDB.GetCollection<UserProfile>("UserProfile").Count();
-                    user = new UserProfile {UserName = userName };
+                    user = new UserProfile { UserName = userName };
                     this.mongoDB.GetCollection<UserProfile>("UserProfile").Insert(user, WriteConcern.Acknowledged);
                     user = this.GetUsers(new[] { userName }).FirstOrDefault();
                 }
+
                 var query = Query.EQ("Provider", provider);
                 var oAuth = this.mongoDB.GetCollection<WebpagesOauthMembership>("WebpagesOauthMembership").FindOne(
                     Query.And(query, Query.EQ("ProviderUserId", providerUserId)));
@@ -526,23 +549,27 @@ namespace MongoDBExtendedMembershipProvider
                 else
                 {
                     oAuth.UserId = user.UserId;
-                    if (!this.mongoDB.GetCollection<WebpagesOauthMembership>("WebpagesOauthMembership").Save(oAuth).Ok)
-                    {
-                        throw new MembershipCreateUserException(MembershipCreateStatus.ProviderError);
-                    }
+                    this.mongoDB.GetCollection<WebpagesOauthMembership>("WebpagesOauthMembership").Save(oAuth);
+                    //if (!this.mongoDB.GetCollection<WebpagesOauthMembership>("WebpagesOauthMembership").Save(oAuth).Ok)
+                    //{
+                    //    throw new MembershipCreateUserException(MembershipCreateStatus.ProviderError);
+                    //}
                 }
             }
         }
+
         public override string CreateUserAndAccount(string userName, string password)
         {
             // let the base class handle this one
             return base.CreateUserAndAccount(userName, password);
         }
+
         public override string CreateUserAndAccount(string userName, string password, bool requireConfirmation)
         {
             // let the base class handle this one
             return base.CreateUserAndAccount(userName, password, requireConfirmation);
         }
+
         public override string CreateUserAndAccount(string userName, string password, IDictionary<string, object> values)
         {
             // let the base class handle this one
@@ -552,7 +579,7 @@ namespace MongoDBExtendedMembershipProvider
         public override void DeleteOAuthAccount(string provider, string providerUserId)
         {
             var query = Query.EQ("ProviderUserId", providerUserId);
-            var res = this.mongoDB.GetCollection<WebpagesMembership>("WebpagesMembership").Remove(
+            var res = this.mongoDB.GetCollection<WebpagesMembership>("WebpagesOauthMembership").Remove(
                 Query.And(query, Query.EQ("Provider", provider)), WriteConcern.Acknowledged);
 
             if (!res.Ok)
@@ -572,6 +599,7 @@ namespace MongoDBExtendedMembershipProvider
             // let the base class handle this one
             return base.GeneratePasswordResetToken(userName);
         }
+
         public override string GetOAuthTokenSecret(string token)
         {
             var oauthToken =
@@ -581,6 +609,7 @@ namespace MongoDBExtendedMembershipProvider
                 return oauthToken.Secret;
             return null;
         }
+
         public override int GetUserIdFromOAuth(string provider, string providerUserId)
         {
             var query = Query.EQ("Provider", provider);
@@ -591,18 +620,21 @@ namespace MongoDBExtendedMembershipProvider
             }
             return -1;
         }
+
         public override string GetUserNameFromId(int userId)
         {
-            var userProfile = this.mongoDB.GetCollection<UserProfile>("UserProfile").FindOne(Query.EQ("UserId", userId));
+            var userProfile = this.mongoDB.GetCollection<UserProfile>("UserProfile").FindOne(Query.EQ("_id", userId));
             if (userProfile != null)
                 return userProfile.UserName;
             return null;
         }
+
         public override bool HasLocalAccount(int userId)
         {
             var acc = this.mongoDB.GetCollection<WebpagesMembership>("WebpagesMembership").FindOne(Query.EQ("UserId", userId));
             return acc != null;
         }
+
         public override void ReplaceOAuthRequestTokenWithAccessToken(string requestToken, string accessToken, string accessTokenSecret)
         {
             this.mongoDB.GetCollection<WebpagesOauthToken>("WebpagesOauthToken").Remove(Query.EQ("Token", requestToken), WriteConcern.Acknowledged);
@@ -625,6 +657,7 @@ namespace MongoDBExtendedMembershipProvider
             return;
 
         }
+
         #endregion
 
         #region Helper Methods
@@ -635,11 +668,21 @@ namespace MongoDBExtendedMembershipProvider
             return users;
         }
 
+        private IEnumerable<UserProfile> GetUsersByEmail(string[] emailaddresses)
+        {
+            var users = this.mongoDB.GetCollection<UserProfile>("UserProfile").Find(Query.In("Email", new BsonArray(emailaddresses)));
+            return users;
+        }
+
         private void CreateUser(string userName, IDictionary<string, object> values)
         {
             if (GetUsers(new[] { userName }).Count() > 0)
             {
                 throw new MembershipCreateUserException(MembershipCreateStatus.DuplicateUserName);
+            }
+            if (values["Email"] != null && GetUsersByEmail(new[] { values["Email"].ToString() }).Count() > 0)
+            {
+                throw new MembershipCreateUserException(MembershipCreateStatus.DuplicateEmail);
             }
 
             var user = new UserProfile { UserName = userName };
